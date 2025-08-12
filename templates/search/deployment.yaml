@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opencloud.fullname" . }}-search
+  labels:
+    {{- include "opencloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: search
+spec:
+  # FIXME currently the search service is not HA, so we use a single replica
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opencloud.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: search
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "opencloud.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        app.kubernetes.io/component: search
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: search
+          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh"]
+          args: ["-c", "opencloud search server"]
+          env:
+            - name: OC_URL
+              value: "https://{{ .Values.opencloud.domain }}"
+            # open ports to other services
+            - name: SEARCH_GRPC_ADDR
+              value: 0.0.0.0:9220
+            - name: SEARCH_DEBUG_ADDR
+              value: 0.0.0.0:9224
+              
+            # Use the external nats as the service registry
+            - name: MICRO_REGISTRY
+              value: "nats-js-kv"
+            - name: MICRO_REGISTRY_ADDRESS
+              value: {{ .Values.nats.endpoint | quote }}
+
+            # Use the external nats as the messaging system
+            - name: OC_EVENTS_ENDPOINT
+              value: {{ .Values.nats.endpoint | quote }}
+            - name: OC_EVENTS_CLUSTER
+              value: {{ .Values.nats.cluster | quote }}
+            - name: OC_EVENTS_ENABLE_TLS
+              value: {{ .Values.nats.tls.enabled | quote }}
+            - name: OC_EVENTS_TLS_INSECURE
+              value: {{ .Values.nats.tls.insecure | quote }}
+
+            # Search settings
+            #- name: SEARCH_EXTRACTOR_TYPE
+            #  value: "tika"
+            #- name: SEARCH_EXTRACTOR_TIKA_TIKA_URL
+            #  value: "http://{ { include "opencloud.tika.fullname" . } }:9998"
+
+          ports:
+            - name: debug
+              containerPort: 9224
+              protocol: TCP
+            - name: grpc
+              containerPort: 9220
+              protocol: TCP
+          volumeMounts:
+            - name: etc-opencloud
+              mountPath: /etc/opencloud
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /healthz # TODO use /readyz after https://github.com/opencloud-eu/opencloud/issues/1221 has been fixed
+              port: 9224
+            periodSeconds: 2
+            timeoutSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9224
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz # TODO use /readyz after https://github.com/opencloud-eu/opencloud/issues/1221 has been fixed
+              port: 9224
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: etc-opencloud
+          persistentVolumeClaim:
+            claimName: {{ include "opencloud.fullname" . }}-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "opencloud.fullname" . }}-search-data

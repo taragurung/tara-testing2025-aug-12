@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: csp-config
+  labels:
+    {{- include "opencloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opencloud
+data:
+  # CSP configuration
+  csp.yaml: |-
+{{- if .Values.csp.override.directives }}
+{{ toYaml .Values.csp.override | nindent 4 }}
+{{- else }}
+    directives:
+      child-src:
+        - '''self'''
+      connect-src:
+        - '''self'''
+        - 'blob:'
+        - 'https://raw.githubusercontent.com/opencloud-eu/awesome-apps/'
+        # OIDC issuer is always a URL (e.g. from Keycloak), but we only allow the scheme and host here
+        # to avoid CSP violations from path-based restrictions. Full path is not needed for connect-src.
+        {{- $issuerUrl := tpl .Values.auth.oidc.issuer . | urlParse }}
+        - '{{ printf "%s://%s" $issuerUrl.scheme $issuerUrl.host }}'
+      default-src:
+        - '''none'''
+      font-src:
+        - '''self'''
+      frame-ancestors:
+        - '''self'''
+      frame-src:
+        - '''self'''
+        - 'blob:'
+        - 'https://embed.diagrams.net'
+{{- with .Values.webOffice.url }}
+        - '{{ . }}'
+{{- end }}
+        - 'https://docs.opencloud.eu'
+      img-src:
+        - '''self'''
+        - 'data:'
+        - 'blob:'
+        - 'https://raw.githubusercontent.com/opencloud-eu/awesome-apps/'
+{{- with .Values.webOffice.url }}
+        - '{{ . }}'
+{{- end }}
+      manifest-src:
+        - '''self'''
+      media-src:
+        - '''self'''
+      object-src:
+        - '''self'''
+        - 'blob:'
+      script-src:
+        - '''self'''
+        - '''unsafe-inline'''
+      style-src:
+        - '''self'''
+        - '''unsafe-inline'''
+      worker-src:
+        - '''self'''
+{{- end }}

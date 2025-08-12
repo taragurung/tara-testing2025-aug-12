@@ -1,0 +1,616 @@
+repositories:
+  - name: nats
+    url: https://nats-io.github.io/k8s/helm/charts
+  - name: openldap
+    url: https://jp-gouin.github.io/helm-openldap/
+  - name: postgres-operator
+    url: https://opensource.zalando.com/postgres-operator/charts/postgres-operator
+  - name: collabora
+    url: https://collaboraonline.github.io/online/
+  - name: minio
+    url: https://charts.min.io/
+  - name: jaegertracing
+    url: https://jaegertracing.github.io/helm-charts
+  #- name: opendesk-clamav
+  #  url: https://gitlab.opencode.de/api/v4/projects/1381/packages/helm/stable
+  - name: inbucket
+    url: https://inbucket.github.io/inbucket-community
+
+releases:
+  - name: nats
+    namespace: opencloud-nats
+    chart: nats/nats
+    version: 1.3.7
+    labels:
+      ci-lint-skip: true # skip linting this chart in CI
+    values:
+      - config:
+          cluster:
+            enabled: true
+            replicas: 3
+            name: "opencloud-cluster"
+          jetstream:
+            enabled: true
+            memoryStore:
+              enabled: true
+              maxSize: 2Gi
+          merge:
+            00$include: auth.conf
+      - configMap:
+          merge:
+            data:
+              # bcrypted password generated with `nats server passwd`:
+              # nats-sys: O0Z1O5WG2SIisXUToxUPxQUx
+              # opencloud-admin: pwnnH3S42D5dZL90paHEsQop
+              auth.conf: |
+                accounts {
+                  $SYS {
+                    users = [
+                      { user: "nats-sys",
+                        pass: "$2a$11$5BJO2C7WJLjuOm8FBjGjCugs//lL.Sp9gVIBWzU.fITE5MfCbHCMK"
+                      }
+                    ]
+                  }
+                  $OPENCLOUD {
+                    jetstream: enabled
+                    users = [
+                      { user: "opencloud"
+                      },
+                      { user: "opencloud-admin",
+                        pass: "$2a$11$6SAHUpN.m2TXOMSdSZVWsOjQ69VCQOBUmxD8FZ/aJpdvzSEOfRodC"
+                      }
+                    ]
+                  }
+                }
+                no_auth_user: opencloud
+
+  - name: nack-crds
+    namespace: opencloud-nack
+    chart: ./nack
+    labels:
+      ci-lint-skip: true # skip linting this chart in CI
+
+  - name: nack-streams
+    namespace: opencloud-nats
+    chart: ./streams
+    labels:
+      ci-lint-skip: true # skip linting this chart in CI
+    needs:
+      - opencloud-nats/nats
+      - opencloud-nack/nack-crds
+
+  - name: nack
+    namespace: opencloud-nack
+    chart: nats/nack
+    version: 0.29.0
+    labels:
+      ci-lint-skip: true # skip linting this chart in CI
+    values:
+      - namespaced: false
+      - readOnly: false
+    needs:
+      - opencloud-nack/nack-crds
+
+  - name: postgres-operator
+    namespace: postgres-operator
+    chart: postgres-operator/postgres-operator
+    version: 1.14.0
+    labels:
+      ci-lint-skip: true # skip linting this chart in CI
+    values:
+      - configConnectionPooler:
+          connection_pooler_max_db_connections: 300
+          connection_pooler_number_of_instances: 3
+          connection_pooler_mode: "session"
+
+  - name: postgres
+    chart: ./postgresql
+    namespace: keycloak
+    labels:
+      ci-lint-skip: true # skip linting this chart in CI
+    needs:
+      - postgres-operator/postgres-operator
+
+  - name: keycloak-operator
+    chart: ./keycloak-k8s-resources/kubernetes
+    namespace: keycloak
+    labels:
+      ci-lint-skip: true # skip linting this chart in CI
+
+  - name: keycloak
+    chart: ./keycloak
+    namespace: keycloak
+    labels:
+      ci-lint-skip: true # skip linting this chart in CI
+    needs:
+      - keycloak/keycloak-operator
+      - keycloak/postgres
+
+  - name: openldap
+    namespace: openldap
+    chart: openldap/openldap-stack-ha
+    version: 4.3.3
+    labels:
+      ci-lint-skip: true # skip linting this chart in CI
+    values:
+      - ltb-passwd:
+          enabled: false
+      - replication:
+          enabled: true
+      - global:
+          ldapDomain: "opencloud.eu"
+          adminPassword: ldap-admin-password
+          configPassword: config
+      - customLdifFiles:
+          10_base.ldif: |-
+            dn: dc=opencloud,dc=eu
+            objectClass: organization
+            objectClass: dcObject
+            dc: opencloud
+            o: openCloud
+
+            dn: ou=users,dc=opencloud,dc=eu
+            objectClass: organizationalUnit
+            ou: users
+
+            dn: cn=admin,dc=opencloud,dc=eu
+            objectClass: inetOrgPerson
+            objectClass: person
+            cn: admin
+            sn: admin
+            uid: ldapadmin
+
+            dn: ou=groups,dc=opencloud,dc=eu
+            objectClass: organizationalUnit
+            ou: groups
+
+            dn: ou=custom,ou=groups,dc=opencloud,dc=eu
+            objectClass: organizationalUnit
+            ou: custom
+
+          20_admin.ldif: |-
+            dn: uid=admin,ou=users,dc=opencloud,dc=eu
+            objectClass: inetOrgPerson
+            objectClass: organizationalPerson
+            objectClass: person
+            objectClass: top
+            uid: admin
+            givenName: Admin
+            sn: Admin
+            cn: admin
+            displayName: Admin
+            description: An admin for this OpenCloud instance.
+            mail: admin@example.org
+            userPassword:: e1NTSEF9UWhmaFB3dERydTUydURoWFFObDRMbzVIckI3TkI5Nmo==
+
+            dn: cn=administrators,ou=groups,dc=opencloud,dc=eu
+            objectClass: groupOfNames
+            objectClass: top
+            cn: administrators
+            description: OpenCloud Administrators
+            member: uid=admin,ou=users,dc=opencloud,dc=eu
+
+          30_demo_users.ldif: |-
+            # Start dn with uid (user identifier / login), not cn (Firstname + Surname)
+            dn: uid=alan,ou=users,dc=opencloud,dc=eu
+            objectClass: inetOrgPerson
+            objectClass: organizationalPerson
+            objectClass: person
+            objectClass: top
+            uid: alan
+            givenName: Alan
+            sn: Turing
+            cn: alan
+            displayName: Alan Turing
+            description:  An English mathematician, computer scientist, logician, cryptanalyst, philosopher and theoretical biologist. He was highly influential in the development of theoretical computer science, providing a formalisation of the concepts of algorithm and computation with the Turing machine.
+            mail: alan@example.org
+            userPassword:: e1NTSEF9Y2ZMdVlqMTBDUFpLWE44VC9mQ0FzYnFHQmtyZExJeGg=
+
+            dn: uid=lynn,ou=users,dc=opencloud,dc=eu
+            objectClass: inetOrgPerson
+            objectClass: organizationalPerson
+            objectClass: person
+            objectClass: top
+            uid: lynn
+            givenName: Lynn
+            sn: Conway
+            cn: lynn
+            displayName: Lynn Conway
+            description:  An American computer scientist, electrical engineer, and transgender activist.
+            mail: lynn@example.org
+            userPassword:: e1NTSEF9Y2ZMdVlqMTBDUFpLWE44VC9mQ0FzYnFHQmtyZExJeGg=
+
+            dn: uid=mary,ou=users,dc=opencloud,dc=eu
+            objectClass: inetOrgPerson
+            objectClass: organizationalPerson
+            objectClass: person
+            objectClass: top
+            uid: mary
+            givenName: Mary
+            sn: Kenneth Keller
+            cn: mary
+            displayName: Mary Kenneth Keller
+            description: Mary Kenneth Keller of the Sisters of Charity of the Blessed Virgin Mary was a pioneer in computer science.
+            mail: mary@example.org
+            userPassword:: e1NTSEF9Y2ZMdVlqMTBDUFpLWE44VC9mQ0FzYnFHQmtyZExJeGg=
+
+            dn: uid=margaret,ou=users,dc=opencloud,dc=eu
+            objectClass: inetOrgPerson
+            objectClass: organizationalPerson
+            objectClass: person
+            objectClass: top
+            uid: margaret
+            givenName: Margaret
+            sn: Hamilton
+            cn: margaret
+            displayName: Margaret Hamilton
+            description: A director of the Software Engineering Division of the MIT Instrumentation Laboratory, which developed on-board flight software for NASA's Apollo program.
+            mail: margaret@example.org
+            userPassword:: e1NTSEF9Y2ZMdVlqMTBDUFpLWE44VC9mQ0FzYnFHQmtyZExJeGg=
+
+            dn: uid=dennis,ou=users,dc=opencloud,dc=eu
+            objectClass: inetOrgPerson
+            objectClass: organizationalPerson
+            objectClass: person
+            objectClass: top
+            uid: dennis
+            givenName: Dennis
+            sn: Ritchie
+            cn: dennis
+            displayName: Dennis Ritchie
+            description: American computer scientist. He created the C programming language and the Unix operating system and B language with long-time colleague Ken Thompson.
+            mail: dennis@example.org
+            userPassword:: e1NTSEF9Y2ZMdVlqMTBDUFpLWE44VC9mQ0FzYnFHQmtyZExJeGg=
+
+          40_demo_groups.ldif: |-
+            dn: cn=users,ou=groups,dc=opencloud,dc=eu
+            objectClass: groupOfNames
+            objectClass: top
+            cn: users
+            description: Users
+            member: uid=alan,ou=users,dc=opencloud,dc=eu
+            member: uid=mary,ou=users,dc=opencloud,dc=eu
+            member: uid=margaret,ou=users,dc=opencloud,dc=eu
+            member: uid=dennis,ou=users,dc=opencloud,dc=eu
+            member: uid=lynn,ou=users,dc=opencloud,dc=eu
+            member: uid=admin,ou=users,dc=opencloud,dc=eu
+
+            dn: cn=chess-lovers,ou=groups,dc=opencloud,dc=eu
+            objectClass: groupOfNames
+            objectClass: top
+            cn: chess-lovers
+            description: Chess lovers
+            member: uid=alan,ou=users,dc=opencloud,dc=eu
+
+            dn: cn=machine-lovers,ou=groups,dc=opencloud,dc=eu
+            objectClass: groupOfNames
+            objectClass: top
+            cn: machine-lovers
+            description: Machine Lovers
+            member: uid=alan,ou=users,dc=opencloud,dc=eu
+
+            dn: cn=bible-readers,ou=groups,dc=opencloud,dc=eu
+            objectClass: groupOfNames
+            objectClass: top
+            cn: bible-readers
+            description: Bible readers
+            member: uid=mary,ou=users,dc=opencloud,dc=eu
+
+            dn: cn=apollos,ou=groups,dc=opencloud,dc=eu
+            objectClass: groupOfNames
+            objectClass: top
+            cn: apollos
+            description: Contributors to the Apollo mission
+            member: uid=margaret,ou=users,dc=opencloud,dc=eu
+
+            dn: cn=unix-lovers,ou=groups,dc=opencloud,dc=eu
+            objectClass: groupOfNames
+            objectClass: top
+            cn: unix-lovers
+            description: Unix lovers
+            member: uid=dennis,ou=users,dc=opencloud,dc=eu
+
+            dn: cn=basic-haters,ou=groups,dc=opencloud,dc=eu
+            objectClass: groupOfNames
+            objectClass: top
+            cn: basic-haters
+            description: Haters of the Basic programming language
+            member: uid=dennis,ou=users,dc=opencloud,dc=eu
+
+            dn: cn=vlsi-lovers,ou=groups,dc=opencloud,dc=eu
+            objectClass: groupOfNames
+            objectClass: top
+            cn: vlsi-lovers
+            description: Lovers of VLSI microchip design
+            member: uid=lynn,ou=users,dc=opencloud,dc=eu
+
+            dn: cn=programmers,ou=groups,dc=opencloud,dc=eu
+            objectClass: groupOfNames
+            objectClass: top
+            cn: programmers
+            description: Computer Programmers
+            member: uid=alan,ou=users,dc=opencloud,dc=eu
+            member: uid=margaret,ou=users,dc=opencloud,dc=eu
+            member: uid=dennis,ou=users,dc=opencloud,dc=eu
+            member: uid=lynn,ou=users,dc=opencloud,dc=eu
+
+      - customSchemaFiles:
+          10_opencloud_schema.ldif: |-
+            # This LDIF files describes the OpenCloud schema
+            dn: cn=opencloud,cn=schema,cn=config
+            objectClass: olcSchemaConfig
+            cn: opencloud
+            olcObjectIdentifier: openCloudOid 1.3.6.1.4.1.63016
+            # We'll use openCloudOid:1 subarc for LDAP related stuff
+            #   openCloudOid:1.1 for AttributeTypes and openCloudOid:1.2 for ObjectClasses
+            olcAttributeTypes: ( openCloudOid:1.1.1 NAME 'openCloudUUID'
+              DESC 'A non-reassignable and persistent account ID)'
+              EQUALITY uuidMatch
+              SUBSTR caseIgnoreSubstringsMatch
+              SYNTAX 1.3.6.1.1.16.1 SINGLE-VALUE )
+            olcAttributeTypes: ( openCloudOid:1.1.2 NAME 'openCloudExternalIdentity'
+              DESC 'A triple separated by "$" representing the objectIdentity resource type of the Graph API ( signInType $ issuer $ issuerAssignedId )'
+              EQUALITY caseIgnoreMatch
+              SUBSTR caseIgnoreSubstringsMatch
+              SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
+            olcAttributeTypes: ( openCloudOid:1.1.3 NAME 'openCloudUserEnabled'
+              DESC 'A boolean value indicating if the user is enabled'
+              EQUALITY booleanMatch
+              SYNTAX 1.3.6.1.4.1.1466.115.121.1.7 SINGLE-VALUE)
+            olcAttributeTypes: ( openCloudOid:1.1.4 NAME 'openCloudUserType'
+              DESC 'User type (e.g. Member or Guest)'
+              EQUALITY caseIgnoreMatch
+              SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+            olcAttributeTypes: ( openCloudOid:1.1.5 NAME 'openCloudLastSignInTimestamp'
+              DESC 'The timestamp of the last sign-in'
+              EQUALITY generalizedTimeMatch
+              ORDERING generalizedTimeOrderingMatch
+              SYNTAX  1.3.6.1.4.1.1466.115.121.1.24 SINGLE-VALUE )
+            olcObjectClasses: ( openCloudOid:1.2.1 NAME 'openCloudObject'
+              DESC 'OpenCloud base objectclass'
+              AUXILIARY
+              MAY ( openCloudUUID ) )
+            olcObjectClasses: ( openCloudOid:1.2.2 NAME 'openCloudUser'
+              DESC 'OpenCloud User objectclass'
+              SUP openCloudObject
+              AUXILIARY
+              MAY ( openCloudExternalIdentity $ openCloudUserEnabled $ openCloudUserType $ openCloudLastSignInTimestamp) )
+
+  - name: collabora-proofkey
+    chart: collabora
+    namespace: collabora
+    labels:
+      ci-lint-skip: true # skip linting this chart in CI
+
+  - name: collabora
+    namespace: collabora
+    chart: collabora/collabora-online
+    version: 1.1.37
+    labels:
+      ci-lint-skip: true # skip linting this chart in CI
+    values:
+      - collabora:
+          aliasgroups:
+            #- host: "wopi.opencloud.test" # needed because we connect via the ingress to the collaboration service
+            - host: "http://opencloud.opencloud.svc.cluster.local:9300" # needed if we would use the cluster internal Service to connect to the collaboration service
+          extra_params: --o:ssl.enable=false --o:ssl.termination=true --o:net.frame_ancestors=cloud.opencloud.test
+          proofKeysSecretRef: proofkey
+      - ingress:
+          enabled: true
+          hosts:
+            - host: weboffice.opencloud.test
+              paths:
+                - path: /
+                  pathType: ImplementationSpecific
+
+  - name: minio
+    chart: minio/minio
+    version: 5.4.0
+    namespace: minio
+    labels:
+      ci-lint-skip: true # skip linting this chart in CI
+    values:
+      - mode: standalone
+      - rootUser: opencloud
+      - rootPassword: opencloud-secret-key
+      - buckets:
+          - name: opencloud-bucket
+            policy: none
+            purge: false
+      - persistence:
+          size: 5Gi
+      - resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+
+  - name: jaeger
+    namespace: observability
+    chart: jaegertracing/jaeger
+    values:
+      - provisionDataStore:
+          cassandra: false
+        allInOne:
+          enabled: true
+          ingress:
+            enabled: true
+            hosts:
+              - jaeger.opencloud.test
+        storage:
+          type: memory
+        agent:
+          enabled: false
+        collector:
+          enabled: false
+        query:
+          enabled: false
+
+  # FIXME The clamav chart relies on c-icap, but the registry for registry.souvap-univention.de/souvap/tooling/images/c-icap:0.5.10 seems to be down.
+  # https://gitlab.opencode.de/bmi/opendesk/components/platform-development/charts/opendesk-clamav/-/tree/main/charts/opendesk-clamav#opendesk-clamav
+  #- name: opendesk-clamav
+  #  chart: opendesk-clamav/opendesk-clamav
+  #  namespace: clamav
+  #  version: 4.0.6
+  #  labels:
+  #    ci-lint-skip: true # skip linting this chart in CI
+  #  values:
+  #    - persistence:
+  #        accessModes:
+  #          - "ReadWriteMany" # it needs to be shared between freshclam and clamav
+  #        storageClass: rook-cephfs
+  #        size: "10Gi"
+  #    - freshclam:
+  #        containerSecurityContext:
+  #          readOnlyRootFilesystem: false
+  #        image:
+  #          tag: "1.4.3" # newer version of clamav/clamav than default chart
+
+  #    - clamd:
+  #        image:
+  #          tag: "1.4.3" # newer version of clamav/clamav than default chart
+
+  #    - icap:
+  #        image:
+  #          tag: "0.5.10" # overwrite incorrect digest pin from default chart
+  #        settings:
+  #          clamdModClamdHost: "opendesk-clamav-clamd"
+
+  #    - milter: # not really needed, but can't be disabled right now
+  #        settings:
+  #          clamdHost: "opendesk-clamav-clamd"
+
+  - name: inbucket
+    chart: inbucket/inbucket
+    namespace: inbucket
+    version: 2.5.0
+    labels:
+      ci-lint-skip: true # skip linting this chart in CI
+    values:
+      - ingress:
+          enabled: true
+          hosts:
+            - host: mail.opencloud.test
+              paths:
+                - path: /
+          tls:
+            - secretName: inbucket-tls
+              hosts:
+                - mail.opencloud.test
+
+  - name: opencloud
+    chart: ../..
+    namespace: opencloud
+    values:
+      - opencloud:
+          # This is the OpenCloud domain
+          domain: cloud.opencloud.test
+          initContainers:
+            # The list of banned passwords can grow over the 1MB limit for config maps, so we download it from the internet.
+            - name: fetch-password-list
+              image: curlimages/curl
+              command: ["sh", "-c"]
+              args: ["curl -o /target/banned-password-list.txt https://raw.githubusercontent.com/opencloud-eu/opencloud-compose/refs/heads/main/config/opencloud/banned-password-list.txt"]
+              volumeMounts:
+                - name: banned-password-list
+                  mountPath: /target
+        collaboration:
+          # This is the OpenCloud domain
+          domain: wopi.opencloud.test
+          initContainers:
+            # Wait for OpenCloud to be ready
+            - name: wait-for-opencloud
+              image: docker.io/library/busybox:1.36
+              imagePullPolicy: IfNotPresent
+              command: ['sh', '-c', 'until wget -q -O- http://opencloud:9200/health; do echo waiting for opencloud; sleep 5; done;']
+
+            # Wait for Collabora to be ready
+            - name: wait-for-collabora
+              image: docker.io/library/busybox:1.36
+              imagePullPolicy: IfNotPresent
+              # it seems busybox cannt look up the dns name
+              #command: ['sh', '-c', 'until wget -q -O- https://{{ .Values.csp.weboffice }}/hosting/discovery; do echo waiting for collabora; sleep 2; done;']
+              command: ['sh', '-c', 'until wget -q -O- http://collabora-collabora-online.collabora.svc.cluster.local:9980/hosting/discovery; do echo waiting for collabora; sleep 2; done;']
+
+        webOffice:
+          url: "https://weboffice.opencloud.test"  # The actual frontend address used by the browser
+
+        auth:
+          oidc:
+            issuer: "https://keycloak.opencloud.test/realms/openCloud"
+            accountEditLinkHref: "https://keycloak.opencloud.test/realms/openCloud/account"
+
+        virusscan:
+          enabled: false
+          infectedFileHandling: abort
+          maxScanSize: "10000000"  # 10 MB
+          icap:
+            url: http://opendesk-clamav-icap.clamav:1344
+            service: avscan
+            timeout: "30s"
+
+        emailNotifications:
+          enabled: true
+          smtp:
+            host: inbucket.inbucket.svc.cluster.local
+            port: 2500
+            sender: "OpenCloud <noreply@cloud.opencloud.test>"
+            authentication: none
+            encryption: none
+
+        tracing:
+          enabled: true
+          type: jaeger
+          endpoint: jaeger-agent.observability.svc.cluster.local:6831
+
+        nats:
+          # The NATS endpoint needs to match the NATS configuration above
+          endpoint: nats.opencloud-nats.svc.cluster.local:4222
+          # The nats cluster name needs to match the nats configuration above
+          cluster: opencloud-cluster
+          # As an alternative you can copy the list from a docker image that contains it.
+          # - name: copy-password-list
+          #   image: your-custom-image:latest
+          #   command: ["sh", "-c", "cp /config/banned-passwords.txt /target/banned-password-list.txt"]
+          #   volumeMounts:
+          #     - name: password-vol
+          #       mountPath: /target
+        persistence:
+          accessMode: ReadWriteMany
+          storageClass: rook-cephfs
+          searchSize: 1Gi
+          configSize: 10Mi
+          size: 10Gi
+        volumeMounts:
+          - name: config
+            mountPath: /etc/opencloud
+          - name: csp-config
+            mountPath: /etc/opencloud/csp.yaml
+            subPath: csp.yaml
+            readOnly: true
+          - name: banned-password-list
+            mountPath: /etc/opencloud/banned-password-list.txt
+            subPath: banned-password-list.txt
+          - name: data
+            mountPath: /var/lib/opencloud
+        volumes:
+          - name: config
+            persistentVolumeClaim:
+              claimName: opencloud-config
+          - name: csp-config
+            configMap:
+              name: csp-config
+          # The banned password list is created with an init container
+          - name: banned-password-list
+            emptyDir: {}
+          - name: data
+            persistentVolumeClaim:
+              claimName: opencloud-data
+        extraResources:
+          - |
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: opencloud-ldap-secret
+            type: Opaque
+            stringData:
+              OC_LDAP_BIND_PASSWORD: ldap-admin-password

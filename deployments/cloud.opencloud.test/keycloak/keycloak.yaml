@@ -1,0 +1,42 @@
+apiVersion: k8s.keycloak.org/v2alpha1
+kind: Keycloak
+metadata:
+  name: opencloud-keycloak
+spec:
+  instances: 3
+  db:
+    vendor: postgres
+    host: postgres-pooler
+    usernameSecret:
+      name: keycloak.postgres.credentials.postgresql.acid.zalan.do
+      key: username
+    passwordSecret:
+      name: keycloak.postgres.credentials.postgresql.acid.zalan.do
+      key: password
+    poolInitialSize: 100
+    poolMinSize: 100
+    poolMaxSize: 100
+  http:
+    # 1. We cannot use cert manager here, because the .test domain is not resolvable
+    # and cert manager will not be able to issue a certificate
+    # 2. We cannot use a self signed certificate, because it needs to contain the IP SAN
+    # and the IP is not known at this point, so we use http for now, but this should be changed in production
+    # See https://www.keycloak.org/operator/advanced-configuration#_disabling_required_options
+    # tlsSecret: keycloak-tls-secret
+    httpEnabled: true
+  hostname:
+    hostname: https://keycloak.opencloud.test
+  unsupported:
+    podTemplate:
+      spec:
+        containers:
+          - name: keycloak
+            env:
+              - name: JAVA_OPTS_APPEND
+                value: -Xms2g -Xmx3g -Djgroups.thread_dumps_threshold=1
+                # Load shedding, see https://www.keycloak.org/high-availability/deploy-keycloak-kubernetes
+              - name: QUARKUS_THREAD_POOL_QUEUE_SIZE
+                value: "1000"
+                # Sum of JGroups threads should not exceed 200 (default) for all pods https://www.keycloak.org/high-availability/concepts-threads#_jgroups_connection_pool
+              - name: QUARKUS_THREAD_POOL_MAX_THREADS
+                value: "66"

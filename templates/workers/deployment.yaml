@@ -1,0 +1,189 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opencloud.fullname" . }}-workers
+  labels:
+    {{- include "opencloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: workers
+spec:
+  replicas: {{ .Values.workers.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "opencloud.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: workers
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "opencloud.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        app.kubernetes.io/component: workers
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.workers.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        fsGroup: 1000
+      serviceAccountName: opencloud-worker
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          # no ports are exposed, this container bundles the worker services
+          ports: []
+          command: ["/bin/sh"]
+          args: ["-c", "opencloud server"]
+          env:
+            # OpenCloud URL
+            - name: OC_URL
+              value: "https://{{ .Values.opencloud.domain }}"
+            - name: OC_LOG_LEVEL
+              value: {{ .Values.log.level | quote }}
+            - name: OC_LOG_COLOR
+              value: {{ .Values.log.color | quote }}
+            - name: OC_LOG_PRETTY
+              value: {{ .Values.log.pretty | quote }}
+            - name: OC_INSECURE
+              value: "true"
+
+            # notifications uses go micro to connect to settings
+            {{- $run := list "clientlog" "postprocessing" "settings"}}
+            {{- if .Values.audit.enabled }}
+              {{- $run = append $run "audit" }}
+            {{- end }}
+            {{- if .Values.virusscan.enabled }}
+              {{- $run = append $run "antivirus" }}
+            {{- end }}
+            {{- if .Values.emailNotifications.enabled }}
+              {{- $run = append $run "notifications" }}
+            {{- end }}
+            # we only want to run worker type services
+            - name: OC_RUN_SERVICES
+              # currently, we cannot always only run the worker part of a service without the handler
+              value: {{ join "," $run | quote }}
+
+            # we use kubernetes as the registry, so we can use the service names as endpoints
+            - name: MICRO_REGISTRY
+              value: "memory"
+
+            # connect to the reva gateway via the service
+            - name: OC_REVA_GATEWAY
+              value: "kubernetes://{{ include "opencloud.fullname" . }}-gateway:9142"
+
+            - name: SETTINGS_STORAGE_GRPC_ADDR
+              value: "kubernetes://{{ include "opencloud.fullname" . }}-storage-system:9215"
+            - name: SETTINGS_STORAGE_GATEWAY_GRPC_ADDR
+              value: "kubernetes://{{ include "opencloud.fullname" . }}-storage-system:9215"
+            - name: SETTINGS_SETUP_DEFAULT_ASSIGNMENTS
+              value: "false"
+
+            {{- with .Values.nats.endpoint }}
+            # Use the external nats as the cache and persistent store
+            - name: OC_CACHE_STORE
+              value: "nats-js-kv"
+            - name: OC_PERSISTENT_STORE
+              value: "nats-js-kv"
+            - name: OC_CACHE_STORE_NODES
+              value: {{ . | quote }}
+            - name: OC_PERSISTENT_STORE_NODES
+              value: {{ . | quote }}
+            # Use the external nats as the messaging system
+            - name: OC_EVENTS_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.nats.cluster }}
+            - name: OC_EVENTS_CLUSTER
+              value: {{ . | quote }}
+            {{- end }}
+            
+            {{- if .Values.virusscan.enabled }}
+            - name: ANTIVIRUS_INFECTED_FILE_HANDLING
+              value: {{ .Values.virusscan.infectedFileHandling | quote }}
+            - name: ANTIVIRUS_SCANNER_TYPE
+              value: "icap"
+            - name: ANTIVIRUS_ICAP_SCAN_TIMEOUT
+              value: {{ .Values.virusscan.icap.timeout | quote }}
+            - name: ANTIVIRUS_ICAP_URL
+              value: {{ .Values.virusscan.icap.url | quote }}
+            - name: ANTIVIRUS_ICAP_SERVICE
+              value: {{ .Values.virusscan.icap.service | quote }}
+            - name: ANTIVIRUS_MAX_SCAN_SIZE
+              value: {{ .Values.virusscan.maxScanSize | quote }}
+            - name: ANTIVIRUS_WORKERS
+              value: {{ .Values.workers.antivirus.concurrency | quote }}
+            {{- end }}
+
+            {{- if .Values.emailNotifications.enabled }}
+            - name: NOTIFICATIONS_SMTP_HOST
+              value: {{ .Values.emailNotifications.smtp.host | quote }}
+            - name: NOTIFICATIONS_SMTP_PORT
+              value: {{ .Values.emailNotifications.smtp.port | quote }}
+            - name: NOTIFICATIONS_SMTP_SENDER
+              value: {{ .Values.emailNotifications.smtp.sender | quote }}
+            - name: NOTIFICATIONS_SMTP_AUTHENTICATION
+              value: {{ .Values.emailNotifications.smtp.authentication | quote }}
+            - name: NOTIFICATIONS_SMTP_ENCRYPTION
+              value: {{ .Values.emailNotifications.smtp.encryption | quote }}
+
+            #{{- if ne .Values.emailNotifications.smtp.authentication "none" }}
+            # FIXME use secrets
+            #- name: NOTIFICATIONS_SMTP_USERNAME
+            #  valueFrom:
+            #    secretKeyRef:
+            #      name: { { include "secrets.notificationsSMTPSecret" . } }
+            #      key: smtp-username
+
+            #- name: NOTIFICATIONS_SMTP_PASSWORD
+            #  valueFrom:
+            #    secretKeyRef:
+            #      name: { { include "secrets.notificationsSMTPSecret" . } }
+            #      key: smtp-password
+            #{{- end }}
+            {{- end }}
+
+            {{- with .Values.tracing }}
+            - name: OC_TRACING_ENABLED
+              value: {{ .enabled | quote }}
+            - name: OC_TRACING_TYPE
+              value: {{ .type | quote }}
+            - name: OC_TRACING_ENDPOINT
+              value: {{ .endpoint | quote }}
+            {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: etc-opencloud
+              mountPath: /etc/opencloud
+              readOnly: true
+      volumes:
+        - name: etc-opencloud
+          persistentVolumeClaim:
+            claimName: {{ include "opencloud.fullname" . }}-config

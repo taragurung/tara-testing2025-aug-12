@@ -1,0 +1,330 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opencloud.fullname" . }}
+  labels:
+    {{- include "opencloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opencloud
+spec:
+  replicas: {{ .Values.opencloud.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "opencloud.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: opencloud
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "opencloud.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        app.kubernetes.io/component: opencloud
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.opencloud.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: reva-gateway
+              containerPort: 9124
+              protocol: TCP
+            - name: http
+              containerPort: 9200
+              protocol: TCP
+            - name: storage-system
+              containerPort: 9215
+              protocol: TCP
+            - name: system-http
+              containerPort: 9216
+              protocol: TCP
+          # try runninig init to initialize config
+          command: ["/bin/sh"]
+          args: ["-c", "opencloud init || true; opencloud server"]
+          env:
+            # OpenCloud URL
+            - name: OC_URL
+              value: "https://{{ .Values.opencloud.domain }}"
+            - name: OC_LOG_LEVEL
+              value: {{ .Values.log.level | quote }}
+            - name: OC_LOG_COLOR
+              value: {{ .Values.log.color | quote }}
+            - name: OC_LOG_PRETTY
+              value: {{ .Values.log.pretty | quote }}
+            # Do not use SSL between proxy and OpenCloud
+            - name: PROXY_TLS
+              value: "false"
+            - name: OC_INSECURE
+              value: "true"
+            - name: OC_EXCLUDE_RUN_SERVICES
+              # we only want to run request driven services
+              # the external and currently non scaling services can be excluded: nats,idp,idm,search
+              # the worker services can be exluded as well: antivirus,audit,clientlog,notifications,postprocessing
+              #value: "app-provider,nats,idp,idm,search,antivirus,audit,clientlog,notifications,postprocessing"
+              # we are going to run a nats node to communicate with the collaboration service
+              value: "app-provider,idp,idm,search,antivirus,audit,clientlog,notifications,postprocessing,ocm"
+            {{- with .Values.nats.endpoint }}
+            # Use an in memory service registry to prevent the microservices from registering themselves
+            # We will use kubernetes services to discover the other pods
+            # ahh but what about the collaboration service?
+            - name: MICRO_REGISTRY
+              value: "nats-js-kv"
+            # limit the registry to the local nats instance
+            - name: MICRO_REGISTRY_ADDRESS
+              value: "127.0.0.1:9233"
+            # Use the external nats as the cache and persistent store
+            - name: OC_CACHE_STORE
+              value: "nats-js-kv"
+            - name: OC_PERSISTENT_STORE
+              value: "nats-js-kv"
+            - name: OC_CACHE_STORE_NODES
+              value: {{ . | quote }}
+            - name: OC_PERSISTENT_STORE_NODES
+              value: {{ . | quote }}
+            # Use the external nats as the messaging system
+            - name: OC_EVENTS_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.nats.cluster }}
+            - name: OC_EVENTS_CLUSTER
+              value: {{ . | quote }}
+            {{- end }}
+            - name: FRONTEND_ARCHIVER_MAX_SIZE
+              value: {{ .Values.archiverMaxSize | quote }}
+            - name: PROXY_CSP_CONFIG_FILE_LOCATION
+              value: "/etc/opencloud/csp.yaml"
+
+            {{- with .Values.ldap }}
+            - name: "OC_LDAP_URI"
+              value: {{ .serverUrl | quote }}
+            - name: "OC_LDAP_INSECURE"
+              value: {{ .insecure | quote }}
+            - name: "OC_LDAP_BIND_DN"
+              value: {{ .bindDn | quote }}
+            - name: "OC_LDAP_BIND_PASSWORD"
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .existingSecret | quote }}
+                  key: OC_LDAP_BIND_PASSWORD
+            - name: "OC_LDAP_GROUP_BASE_DN"
+              value: {{ .groupBaseDn | quote }}
+            - name: "OC_LDAP_GROUP_FILTER"
+              value: {{ .groupFilter | quote }}
+            - name: "OC_LDAP_GROUP_SCHEMA_ID"
+              value: {{ .groupSchemaId | quote }}
+            - name: "GRAPH_LDAP_GROUP_CREATE_BASE_DN"
+              value: {{ .groupCreateBaseDn | quote }}
+            - name: "OC_LDAP_USER_BASE_DN"
+              value: {{ .userBaseDn | quote }}
+            - name: "OC_LDAP_USER_FILTER"
+              value: {{ .userFilter | quote }}
+            - name: "OC_LDAP_USER_SCHEMA_ID"
+              value: {{ .userSchemaId | quote }}
+            - name: "OC_LDAP_DISABLE_USER_MECHANISM"
+              value: "none"
+            - name: "GRAPH_LDAP_SERVER_UUID"
+              value: "true"
+            - name: "GRAPH_LDAP_REFINT_ENABLED"
+              value: "true" # osixia has refint enabled.
+            - name: "FRONTEND_READONLY_USER_ATTRIBUTES"
+              value: {{ .readonlyUserAttributes | quote }}
+            - name: "OC_LDAP_SERVER_WRITE_ENABLED"
+              value: "false" # the ldap is managed by Keycloak, so it is not writable by OpenCloud
+            {{- end }}
+
+            {{- with .Values.auth.oidc }}
+            # Keycloak IDP specific configuration
+            - name: "PROXY_AUTOPROVISION_ACCOUNTS"
+              value: "false"
+            - name: "PROXY_ROLE_ASSIGNMENT_DRIVER"
+              value: "oidc"
+            - name: "OC_OIDC_ISSUER"
+              value: {{ .issuer | quote }}
+            - name: "PROXY_OIDC_REWRITE_WELLKNOWN"
+              value: "true"
+            - name: "WEB_OIDC_CLIENT_ID"
+              value: {{ .clientId | quote }}
+            - name: "PROXY_USER_OIDC_CLAIM"
+              value: "uuid"
+            - name: "PROXY_USER_CS3_CLAIM"
+              value: "userid"
+            - name: "WEB_OPTION_ACCOUNT_EDIT_LINK_HREF"
+              value: {{ .accountEditLinkHref | quote }}
+            # admin and demo accounts must be created in Keycloak
+            - name: "OC_ADMIN_USER_ID"
+              value: ""
+            - name: "SETTINGS_SETUP_DEFAULT_ASSIGNMENTS"
+              value: "false"
+            - name: "GRAPH_ASSIGN_DEFAULT_USER_ROLE"
+              value: "false"
+            - name: "GRAPH_USERNAME_MATCH"
+              value: "none"
+            {{- end }}
+
+            # Make the REVA gateway accessible to the workers
+            - name: GATEWAY_GRPC_ADDR
+              value: "0.0.0.0:9142"
+
+            # Make the REVA storage system accessible to the workers
+            - name: STORAGE_SYSTEM_GRPC_ADDR
+              value: "0.0.0.0:9215"
+            - name: STORAGE_SYSTEM_HTTP_ADDR
+              value: "0.0.0.0:9216"
+            - name: STORAGE_SYSTEM_DATA_SERVER_URL
+              value: "http://{{ include "opencloud.fullname" . }}:9216/data"
+
+            # not needed if the workers
+            #{{- if .Values.emailNotifications.enabled }}
+            ## the settings service is called by notifications
+            #- name: SETTINGS_GRPC_ADDR
+            #  value: "0.0.0.0:9191"
+            #{{- end }}
+
+            # collabora specific configuration
+            - name: "FRONTEND_APP_HANDLER_SECURE_VIEW_APP_ADDR"
+              value: "dns:///127.0.0.1:9301"
+            - name: "GRAPH_AVAILABLE_ROLES"
+              value: "b1e2218d-eef8-4d4c-b82d-0f1a1b48f3b5,a8d5fe5e-96e3-418d-825b-534dbdf22b99,fb6c3e19-e378-47e5-b277-9732f9de6e21,58c63c02-1d89-4572-916a-870abc5a1b7d,2d00ce52-1fc2-4dbc-8b95-a73b73395f5a,1c996275-f1c9-4e71-abdf-a42f6495e960,312c0871-5ef7-4b3a-85b6-0e4074c64049,aa97fe03-7980-45ac-9e50-b325749fd7e6"
+
+            # s3 storage configuration
+            {{- with .Values.s3 }}
+            # activate decomposeds3 storage driver
+            - name: STORAGE_USERS_DRIVER
+              value: "decomposeds3"
+            # keep system data on opencloud storage since this are only small files atm
+            - name: STORAGE_SYSTEM_DRIVER
+              value: "decomposed"
+            # decomposeds3 specific settings
+            - name: STORAGE_USERS_DECOMPOSEDS3_ENDPOINT
+              value: {{ .endpoint | quote }}
+            - name: STORAGE_USERS_DECOMPOSEDS3_REGION
+              value: {{ .region | quote }}
+            - name: STORAGE_USERS_DECOMPOSEDS3_ACCESS_KEY
+              value: {{ .accessKey | quote }}
+            - name: STORAGE_USERS_DECOMPOSEDS3_SECRET_KEY
+              value: {{ .secretKey | quote }}
+            - name: STORAGE_USERS_DECOMPOSEDS3_BUCKET
+              value: {{ .bucket | quote }}
+            {{- end }}
+            - name: STORAGE_USERS_EVENTS_NUM_CONSUMERS
+              value: {{ .Values.eventsNumConsumers | quote }}
+            {{- with .Values.tracing }}
+            - name: OC_TRACING_ENABLED
+              value: {{ .enabled | quote }}
+            - name: OC_TRACING_TYPE
+              value: {{ .type | quote }}
+            - name: OC_TRACING_ENDPOINT
+              value: {{ .endpoint | quote }}
+            {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.volumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: collaboration
+          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh"]
+          args: ["-c", "opencloud collaboration server"]
+          env:
+            - name: COLLABORATION_GRPC_ADDR
+              value: "0.0.0.0:9301"
+            - name: COLLABORATION_HTTP_ADDR
+              value: "0.0.0.0:9300"
+            - name: MICRO_REGISTRY
+              value: "nats-js-kv"
+            - name: MICRO_REGISTRY_ADDRESS
+              value: "127.0.0.1:9233"
+            - name: OC_REVA_GATEWAY
+              value: "dns:///127.0.0.1:9142"
+
+            - name: COLLABORATION_WOPI_SRC
+              # we can directly connect without going through the gateway
+              value: "http://{{ include "opencloud.fullname" . }}.opencloud.svc.cluster.local:9300"
+            - name: COLLABORATION_APP_NAME
+              value: "CollaboraOnline"
+            - name: COLLABORATION_APP_PRODUCT
+              value: "Collabora"
+            - name: COLLABORATION_APP_ADDR
+              value: "{{ .Values.webOffice.url }}"
+            - name: COLLABORATION_APP_ICON
+              value: "{{ .Values.webOffice.url }}/favicon.ico"
+            - name: COLLABORATION_APP_PROOF_DISABLE
+              value: "true"
+            - name: COLLABORATION_APP_INSECURE
+              value: "true"
+            - name: COLLABORATION_CS3API_DATAGATEWAY_INSECURE
+              value: "true"
+            - name: COLLABORATION_LOG_LEVEL
+              value: "{{ .Values.log.level }}"
+            - name: OC_URL
+              value: "https://{{ .Values.opencloud.domain }}"
+          ports:
+            - name: wopi
+              containerPort: 9300
+              protocol: TCP
+            - name: grpc
+              containerPort: 9301
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/opencloud
+              readOnly: true
+          livenessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - curl --silent --fail http://{{ include "opencloud.fullname" . }}:9200/app/list | grep '"product_name":"Collabora"'
+            timeoutSeconds: 10
+            initialDelaySeconds: 200
+            periodSeconds: 5
+            failureThreshold: 1
+      {{- with .Values.volumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

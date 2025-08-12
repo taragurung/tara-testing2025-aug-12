@@ -1,0 +1,3 @@
+[submodule "deployments/cloud.opencloud.test/keycloak-k8s-resources"]
+	path = deployments/cloud.opencloud.test/keycloak-k8s-resources
+	url = https://github.com/keycloak/keycloak-k8s-resources.git

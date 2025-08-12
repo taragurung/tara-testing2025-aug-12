@@ -1,0 +1,27 @@
+apiVersion: "acid.zalan.do/v1"
+kind: postgresql
+metadata:
+  name: "postgres"
+spec:
+  teamId: "postgres"
+  numberOfInstances: 3
+  users:
+    "keycloak":
+      - superuser
+      - createdb
+  enableConnectionPooler: true
+  databases:
+    "keycloak": "keycloak"
+  postgresql:
+    version: "15"
+    parameters:
+      max_connections: "330"
+  volume:
+    size: "10Gi"
+  resources:
+    requests:
+      cpu: 10m
+      memory: 100Mi
+    limits:
+      cpu: 500m
+      memory: 600Mi
